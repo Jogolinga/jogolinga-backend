@@ -53,29 +53,48 @@ app.use(helmet({
   }
 }));
 
-// CORS sécurisé
+// CORS sécurisé - VERSION CORRIGÉE
 const allowedOrigins = [
   'http://localhost:3000',
+  'http://localhost:3001',
   'https://localhost:3000',
-  process.env.FRONTEND_URL
+  'https://jogolinga-frontend.vercel.app',
+  process.env.FRONTEND_URL,
+  process.env.CORS_ORIGIN
 ].filter(Boolean);
+
+console.log('🔧 CORS - Origines autorisées:', allowedOrigins);
 
 app.use(cors({
   origin: function (origin, callback) {
     // Permettre les requêtes sans origin (mobile apps, postman, etc.)
-    if (!origin) return callback(null, true);
+    if (!origin) {
+      console.log('🔓 CORS: Requête sans origin (autorisée)');
+      return callback(null, true);
+    }
+    
+    console.log('🔍 CORS: Origin reçue:', origin);
     
     if (allowedOrigins.includes(origin)) {
+      console.log('✅ CORS: Origin acceptée:', origin);
       callback(null, true);
     } else {
-      console.warn(`❌ Origine CORS rejetée: ${origin}`);
+      console.warn(`❌ CORS: Origine rejetée: ${origin}`);
+      console.log('📋 CORS: Origines autorisées:', allowedOrigins);
       callback(new Error('Non autorisé par CORS'));
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  optionsSuccessStatus: 200
 }));
+
+// Middleware pour les preflight requests
+app.options('*', (req, res) => {
+  console.log('🔄 CORS: Preflight request pour:', req.path);
+  res.sendStatus(200);
+});
 
 // Rate limiting global
 const globalLimiter = rateLimit({
@@ -89,7 +108,7 @@ const globalLimiter = rateLimit({
 // Rate limiting strict pour authentification
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 5,
+  max: 10, // Augmenté de 5 à 10 pour les tests
   message: { error: 'Trop de tentatives de connexion, réessayez dans 15 minutes' }
 });
 
@@ -107,10 +126,12 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Health check basique
 app.get('/api/health', (req, res) => {
+  console.log('🩺 Health check demandé');
   res.json({
     status: 'OK',
+    message: 'JogoLinga Backend is running',
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV,
+    environment: process.env.NODE_ENV || 'development',
     uptime: Math.floor(process.uptime()),
     version: '1.0.0'
   });
@@ -119,18 +140,21 @@ app.get('/api/health', (req, res) => {
 // Status détaillé (pour monitoring)
 app.get('/api/status', async (req, res) => {
   try {
+    console.log('📊 Status détaillé demandé');
     const status = {
       server: 'healthy',
       database: await subscriptionService.checkDatabaseHealth(),
       supabase: !!process.env.SUPABASE_URL,
       stripe: !!process.env.STRIPE_SECRET_KEY,
       google: !!process.env.GOOGLE_CLIENT_ID,
+      cors: allowedOrigins,
       timestamp: new Date().toISOString(),
       uptime: Math.floor(process.uptime())
     };
     
     res.json(status);
   } catch (error) {
+    console.error('❌ Erreur status:', error);
     res.status(500).json({ 
       error: 'Erreur de status',
       timestamp: new Date().toISOString()
@@ -149,6 +173,7 @@ app.post('/api/auth/google', [
 ], async (req, res) => {
   try {
     console.log('🔐 Tentative de connexion Google');
+    console.log('🌐 Origin de la requête:', req.get('Origin'));
     
     // Validation des entrées
     const errors = validationResult(req);
@@ -161,6 +186,8 @@ app.post('/api/auth/google', [
     }
 
     const { googleToken } = req.body;
+    console.log('🎫 Token Google reçu (longueur):', googleToken.length);
+    
     const result = await authService.authenticateWithGoogle(googleToken);
     
     console.log('✅ Connexion Google réussie pour:', result.user.email);
@@ -174,13 +201,15 @@ app.post('/api/auth/google', [
     console.error('❌ Erreur authentification:', error.message);
     res.status(401).json({ 
       error: 'Authentification échouée',
-      message: 'Token Google invalide ou expiré'
+      message: 'Token Google invalide ou expiré',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
 
 // Vérification du token JWT
 app.get('/api/auth/verify', authService.verifyToken, (req, res) => {
+  console.log('✅ Token JWT vérifié pour:', req.user.email);
   res.json({
     valid: true,
     user: req.user
@@ -398,29 +427,103 @@ app.get('/api/progress/:languageCode', authService.verifyToken, async (req, res)
 });
 
 // ===================================================================
+// ROUTE DE TEST POUR DEBUG CORS
+// ===================================================================
+
+// Route de test simple pour debug CORS
+app.get('/api/test', (req, res) => {
+  console.log('🧪 Route de test appelée');
+  console.log('🌐 Origin:', req.get('Origin'));
+  console.log('🔍 Headers:', req.headers);
+  
+  res.json({
+    message: 'Test CORS réussi !',
+    origin: req.get('Origin'),
+    timestamp: new Date().toISOString(),
+    headers: req.headers
+  });
+});
+
+// ===================================================================
+// WEBHOOKS STRIPE (sans authentification)
+// ===================================================================
+
+// Webhook Stripe (endpoint raw pour signature)
+app.post('/api/stripe/webhook', express.raw({type: 'application/json'}), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  
+  try {
+    console.log('🪝 Webhook Stripe reçu');
+    
+    // Vérification signature Stripe
+    let event;
+    try {
+      event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    } catch (err) {
+      console.error('❌ Signature webhook invalide:', err.message);
+      return res.status(400).send(`Webhook signature error: ${err.message}`);
+    }
+
+    // Traiter l'événement
+    switch (event.type) {
+      case 'checkout.session.completed':
+        console.log('💳 Paiement complété:', event.data.object.id);
+        // Traiter le paiement
+        break;
+      case 'customer.subscription.updated':
+        console.log('🔄 Abonnement mis à jour:', event.data.object.id);
+        await subscriptionService.handleSubscriptionUpdate(event.data.object);
+        break;
+      case 'customer.subscription.deleted':
+        console.log('❌ Abonnement annulé:', event.data.object.id);
+        await subscriptionService.handleSubscriptionCancellation(event.data.object);
+        break;
+      default:
+        console.log(`⚠️ Événement webhook non géré: ${event.type}`);
+    }
+
+    res.json({received: true});
+  } catch (error) {
+    console.error('❌ Erreur webhook:', error);
+    res.status(500).json({error: 'Erreur traitement webhook'});
+  }
+});
+
+// ===================================================================
 // ROUTES 404 ET GESTION D'ERREURS
 // ===================================================================
 
 // 404 Handler
 app.use((req, res) => {
-  console.log(`❓ Route non trouvée: ${req.method} ${req.path}`);
+  console.log(`❓ Route non trouvée: ${req.method} ${req.path} depuis ${req.get('Origin')}`);
   res.status(404).json({ 
     error: 'Route non trouvée',
     path: req.path,
     method: req.method,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    availableRoutes: [
+      'GET /api/health',
+      'GET /api/status', 
+      'POST /api/auth/google',
+      'GET /api/auth/verify',
+      'GET /api/test'
+    ]
   });
 });
 
 // Error Handler Global
 app.use((error, req, res, next) => {
   console.error('💥 Erreur serveur:', error.message);
+  console.error('📍 Stack:', error.stack);
   
   // CORS errors
   if (error.message.includes('CORS')) {
+    console.error('🚫 Erreur CORS détectée pour origin:', req.get('Origin'));
     return res.status(403).json({
       error: 'Accès CORS refusé',
-      message: 'Origine non autorisée'
+      message: 'Origine non autorisée',
+      origin: req.get('Origin'),
+      allowedOrigins: allowedOrigins
     });
   }
   
@@ -446,10 +549,12 @@ const server = app.listen(PORT, () => {
   console.log(`📡 Port: ${PORT}`);
   console.log(`🔗 API: http://localhost:${PORT}/api/health`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`⚡ Stripe: ${process.env.STRIPE_SECRET_KEY ? '✅' : '❌'}`);
-  console.log(`🗄️  Supabase: ${process.env.SUPABASE_URL ? '✅' : '❌'}`);
-  console.log(`🔑 JWT: ${process.env.JWT_SECRET ? '✅' : '❌'}`);
-  console.log(`🔐 Google: ${process.env.GOOGLE_CLIENT_ID ? '✅' : '❌'}`);
+  console.log(`⚡ Stripe: ${process.env.STRIPE_SECRET_KEY ? '✅ Configuré' : '❌ Manquant'}`);
+  console.log(`🗄️  Supabase: ${process.env.SUPABASE_URL ? '✅ Configuré' : '❌ Manquant'}`);
+  console.log(`🔑 JWT: ${process.env.JWT_SECRET ? '✅ Configuré' : '❌ Manquant'}`);
+  console.log(`🔐 Google: ${process.env.GOOGLE_CLIENT_ID ? '✅ Configuré' : '❌ Manquant'}`);
+  console.log(`🌐 CORS Origins:`, allowedOrigins);
+  console.log(`🎯 Frontend URL: ${process.env.FRONTEND_URL || 'Non défini'}`);
   console.log('=====================================\n');
 });
 
