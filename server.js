@@ -9,7 +9,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const morgan = require('morgan');
 const { body, validationResult } = require('express-validator');
-
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
@@ -579,3 +579,4 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 module.exports = app;
+
