@@ -34,6 +34,36 @@ class SubscriptionService {
     if (!process.env.SUPABASE_URL) {
       throw new Error('SUPABASE_URL non configuré');
     }
+    if (!process.env.FRONTEND_URL) {
+      console.warn('⚠️ FRONTEND_URL non configuré');
+    }
+  }
+
+  // ===================================================================
+  // UTILITAIRES POUR URLS
+  // ===================================================================
+  
+  // Fonction pour construire des URLs sécurisées avec schéma explicite
+  constructFullUrl(path) {
+    const frontendUrl = process.env.FRONTEND_URL;
+    
+    if (!frontendUrl) {
+      throw new Error('FRONTEND_URL non configuré dans les variables d\'environnement');
+    }
+    
+    // Vérifier si l'URL a déjà un schéma
+    if (frontendUrl.startsWith('http://') || frontendUrl.startsWith('https://')) {
+      // Enlever le slash final s'il existe
+      const baseUrl = frontendUrl.replace(/\/$/, '');
+      // Ajouter le path en s'assurant qu'il commence par /
+      const cleanPath = path.startsWith('/') ? path : `/${path}`;
+      return `${baseUrl}${cleanPath}`;
+    }
+    
+    // Ajouter https:// par défaut si pas de schéma
+    const baseUrl = `https://${frontendUrl}`.replace(/\/$/, '');
+    const cleanPath = path.startsWith('/') ? path : `/${path}`;
+    return `${baseUrl}${cleanPath}`;
   }
 
   // ===================================================================
@@ -190,7 +220,7 @@ class SubscriptionService {
           error: 'Accès Premium requis',
           message: 'Cette fonctionnalité nécessite un abonnement Premium',
           currentTier: access.tier,
-          upgradeUrl: `${process.env.FRONTEND_URL}/subscription`
+          upgradeUrl: this.constructFullUrl('/subscription')
         });
       }
       
@@ -202,11 +232,11 @@ class SubscriptionService {
   }
 
   // ===================================================================
-  // GESTION STRIPE
+  // GESTION STRIPE - VERSION CORRIGÉE
   // ===================================================================
 
-  // Créer une session de paiement Stripe
-  async createCheckoutSession({ userId, userEmail, planId, priceId, successUrl, cancelUrl }) {
+  // Créer une session de paiement Stripe avec URLs corrigées
+  async createCheckoutSession({ userId, userEmail, planId, priceId, successPath = '/payment-success', cancelPath = '/payment-cancel' }) {
     try {
       console.log(`💳 Création session Stripe pour userId: ${userId}, planId: ${planId}`);
       
@@ -221,7 +251,13 @@ class SubscriptionService {
         throw new Error('Utilisateur non trouvé');
       }
 
-      // Créer la session Stripe
+      // Construire les URLs complètes avec schéma explicite
+      const successUrl = this.constructFullUrl(successPath);
+      const cancelUrl = this.constructFullUrl(cancelPath);
+
+      console.log('🔗 URLs générées:', { successUrl, cancelUrl });
+
+      // Créer la session Stripe avec URLs corrigées
       const session = await stripe.checkout.sessions.create({
         payment_method_types: ['card'],
         line_items: [{
@@ -229,7 +265,7 @@ class SubscriptionService {
           quantity: 1,
         }],
         mode: 'subscription',
-        success_url: successUrl + '?session_id={CHECKOUT_SESSION_ID}',
+        success_url: `${successUrl}?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: cancelUrl,
         customer_email: userEmail,
         client_reference_id: userId,
@@ -245,16 +281,49 @@ class SubscriptionService {
         },
         allow_promotion_codes: true,
         billing_address_collection: 'required',
+        // Paramètres additionnels pour sécuriser la session
+        expires_at: Math.floor(Date.now() / 1000) + (30 * 60), // Expire dans 30 minutes
       });
 
       console.log('✅ Session Stripe créée:', session.id);
-      return session.id;
+      return session;
       
     } catch (error) {
       console.error('❌ Erreur création session Stripe:', error);
+      console.error('Details:', error.message);
       throw new Error('Impossible de créer la session de paiement: ' + error.message);
     }
   }
+
+  // Méthode alternative pour compatibilité avec l'ancien code
+  async createCheckoutSessionLegacy({ userId, userEmail, planId, priceId, successUrl, cancelUrl }) {
+    // Si les URLs sont déjà passées, les valider
+    if (successUrl && cancelUrl) {
+      // Vérifier que les URLs ont un schéma
+      if (!successUrl.startsWith('http://') && !successUrl.startsWith('https://')) {
+        throw new Error('success_url doit inclure un schéma explicite (https://)');
+      }
+      if (!cancelUrl.startsWith('http://') && !cancelUrl.startsWith('https://')) {
+        throw new Error('cancel_url doit inclure un schéma explicite (https://)');
+      }
+      
+      return this.createCheckoutSession({
+        userId,
+        userEmail,
+        planId,
+        priceId,
+        successPath: new URL(successUrl).pathname,
+        cancelPath: new URL(cancelUrl).pathname
+      });
+    }
+    
+    // Utiliser les chemins par défaut
+    return this.createCheckoutSession({ userId, userEmail, planId, priceId });
+  }
+
+  // ===================================================================
+  // RESTE DU CODE INCHANGÉ
+  // ===================================================================
 
   // Vérifier un paiement
   async verifyPayment(sessionId, userId) {
@@ -756,8 +825,8 @@ class SubscriptionService {
     }
   }
 
-  // Obtenir le portail client Stripe
-  async createCustomerPortalSession(userId, returnUrl) {
+  // Obtenir le portail client Stripe avec URL de retour corrigée
+  async createCustomerPortalSession(userId, returnPath = '/subscription') {
     try {
       const { data: subscription, error } = await supabase
         .from('subscriptions')
@@ -768,6 +837,8 @@ class SubscriptionService {
       if (error || !subscription || !subscription.stripe_customer_id) {
         throw new Error('Client Stripe non trouvé');
       }
+
+      const returnUrl = this.constructFullUrl(returnPath);
 
       const session = await stripe.billingPortal.sessions.create({
         customer: subscription.stripe_customer_id,
@@ -780,8 +851,75 @@ class SubscriptionService {
       throw error;
     }
   }
+
+  // ===================================================================
+  // MÉTHODES DE VALIDATION ET DEBUG
+  // ===================================================================
+
+  // Valider la configuration des URLs
+  validateConfiguration() {
+    const config = {
+      frontendUrl: process.env.FRONTEND_URL,
+      stripeKey: process.env.STRIPE_SECRET_KEY ? '✅ Configuré' : '❌ Manquant',
+      supabaseUrl: process.env.SUPABASE_URL ? '✅ Configuré' : '❌ Manquant',
+      supabaseKey: process.env.SUPABASE_SERVICE_KEY ? '✅ Configuré' : '❌ Manquant'
+    };
+
+    console.log('🔍 Configuration du SubscriptionService:', config);
+
+    const errors = [];
+    if (!process.env.FRONTEND_URL) {
+      errors.push('FRONTEND_URL manquant - requis pour les redirections Stripe');
+    }
+    if (!process.env.STRIPE_SECRET_KEY) {
+      errors.push('STRIPE_SECRET_KEY manquant');
+    }
+    if (!process.env.SUPABASE_URL) {
+      errors.push('SUPABASE_URL manquant');
+    }
+    if (!process.env.SUPABASE_SERVICE_KEY) {
+      errors.push('SUPABASE_SERVICE_KEY manquant');
+    }
+
+    if (errors.length > 0) {
+      console.error('❌ Erreurs de configuration:', errors);
+      return { valid: false, errors };
+    }
+
+    // Test de construction d'URL
+    try {
+      const testUrl = this.constructFullUrl('/test');
+      console.log('✅ Test construction URL réussi:', testUrl);
+      return { valid: true, testUrl };
+    } catch (error) {
+      console.error('❌ Erreur construction URL:', error.message);
+      return { valid: false, errors: [error.message] };
+    }
+  }
+
+  // Méthode de debug pour tester les URLs
+  debugUrls() {
+    try {
+      const urls = {
+        success: this.constructFullUrl('/payment-success'),
+        cancel: this.constructFullUrl('/payment-cancel'),
+        subscription: this.constructFullUrl('/subscription'),
+        portal: this.constructFullUrl('/account')
+      };
+
+      console.log('🔗 URLs générées:', urls);
+      return urls;
+    } catch (error) {
+      console.error('❌ Erreur debug URLs:', error);
+      throw error;
+    }
+  }
 }
 
 // Export singleton
 const subscriptionService = new SubscriptionService();
+
+// Valider la configuration au démarrage
+subscriptionService.validateConfiguration();
+
 module.exports = subscriptionService;
