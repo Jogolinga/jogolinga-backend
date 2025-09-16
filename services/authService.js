@@ -1,5 +1,5 @@
 // ===================================================================
-// services/authService.js - SERVICE D'AUTHENTIFICATION BACKEND SÉCURISÉ AVEC ADMIN
+// services/authService.js - SERVICE D'AUTHENTIFICATION BACKEND SÉCURISÉ AVEC ADMIN (CORRIGÉ)
 // ===================================================================
 const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
@@ -251,7 +251,7 @@ class AuthService {
       // 3. 🆕 NOUVEAU: Configurer automatiquement Premium pour les admins
       if (user.is_admin) {
         console.log('👑 Admin détecté, configuration Premium automatique pour:', user.email);
-        await this.setupAdminPremiumSubscription(user); // 🔧 FIX: Maintenant dans une fonction async
+        await this.setupAdminPremiumSubscription(user);
       }
 
       // 4. Générer le token JWT avec information admin
@@ -559,16 +559,19 @@ class AuthService {
   }
 }
 
+// ===================================================================
+// EXPORT CORRIGÉ
+// ===================================================================
+
 // Export singleton
 const authService = new AuthService();
 
 // Test de connexion au démarrage
 authService.testSupabaseConnection();
 
-// 🔧 NOUVEAU : Export des fonctions utilitaires
-module.exports = {
-  ...authService,
-  isAdminEmail,
-  requireAdmin: authService.requireAdmin,
-  setupAdminPremiumSubscription: authService.setupAdminPremiumSubscription
-};
+// 🔧 FIX PRINCIPAL: Export correct
+module.exports = authService;
+
+// 🔧 AJOUT: Export des fonctions utilitaires comme propriétés
+module.exports.isAdminEmail = isAdminEmail;
+module.exports.requireAdmin = authService.requireAdmin;
