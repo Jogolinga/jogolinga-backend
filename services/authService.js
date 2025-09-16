@@ -1,8 +1,11 @@
 // ===================================================================
-// services/authService.js - SERVICE D'AUTHENTIFICATION BACKEND SÉCURISÉ
+// services/authService.js - SERVICE D'AUTHENTIFICATION BACKEND SÉCURISÉ AVEC ADMIN
 // ===================================================================
+const jwt = require('jsonwebtoken');
+const { OAuth2Client } = require('google-auth-library');
+const { createClient } = require('@supabase/supabase-js');
 
-
+// 🔧 NOUVEAU : Liste des emails administrateurs
 const ADMIN_EMAILS = [
   'badji.denany@gmail.com'
 ];
@@ -13,151 +16,6 @@ const isAdminEmail = (email) => {
 
 console.log('👑 Configuration Admin Backend - Emails autorisés:', ADMIN_EMAILS);
 
-// 🔧 DANS LA CLASSE AuthService, MODIFIER LA MÉTHODE authenticateWithGoogle
-// Trouvez votre méthode existante et remplacez la section après "// 3. Générer le JWT" par :
-
-// 3. 🆕 NOUVEAU: Vérifier si c'est un admin et configurer Premium automatiquement
-const isAdmin = isAdminEmail(user.email);
-
-if (isAdmin) {
-  console.log('👑 Admin détecté, configuration Premium automatique pour:', user.email);
-  await this.setupAdminPremiumSubscription(user);
-}
-
-// 4. Générer le JWT avec statut admin
-const jwtToken = jwt.sign(
-  { 
-    userId: user.id, 
-    email: user.email,
-    googleId: user.google_id,
-    isAdmin: isAdmin, // 🔧 IMPORTANT: Inclure le statut admin
-    iat: Math.floor(Date.now() / 1000)
-  },
-  process.env.JWT_SECRET,
-  { expiresIn: '7d' }
-);
-
-console.log('✅ Authentification réussie:', user.email, isAdmin ? '(ADMIN)' : '(USER)');
-
-return {
-  success: true,
-  token: jwtToken,
-  user: {
-    id: user.id,
-    email: user.email,
-    name: user.name,
-    picture: user.picture,
-    isAdmin: isAdmin, // 🔧 IMPORTANT: Inclure dans la réponse
-    createdAt: user.created_at,
-    lastLogin: user.last_login || new Date().toISOString()
-  }
-};
-
-// 🆕 AJOUTER CETTE NOUVELLE MÉTHODE DANS LA CLASSE AuthService
-async setupAdminPremiumSubscription(user) {
-  try {
-    console.log('👑 Configuration abonnement Premium admin pour:', user.email);
-
-    // Chercher un abonnement existant
-    let { data: existingSubscription, error: findError } = await supabase
-      .from('subscriptions')
-      .select('*')
-      .eq('user_id', user.id)
-      .single();
-
-    const adminSubscriptionData = {
-      user_id: user.id,
-      tier: 'premium',
-      status: 'active',
-      plan_id: 'premium_admin',
-      billing_period: 'permanent',
-      starts_at: new Date().toISOString(),
-      expires_at: null, // Pas d'expiration pour les admins
-      payment_id: 'admin_premium_permanent',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
-
-    if (findError && findError.code !== 'PGRST116') {
-      console.error('❌ Erreur recherche abonnement:', findError);
-      // Continuer quand même, on va créer l'abonnement
-    }
-
-    if (!existingSubscription || findError) {
-      // Créer un nouvel abonnement admin
-      const { data: newSubscription, error: createError } = await supabase
-        .from('subscriptions')
-        .insert([adminSubscriptionData])
-        .select()
-        .single();
-
-      if (createError) {
-        console.error('❌ Erreur création abonnement admin:', createError);
-        // Si la table n'existe pas, créer quand même localement
-        return;
-      }
-
-      console.log('✅ Abonnement Premium Admin créé:', newSubscription.plan_id);
-    } else {
-      // Mettre à jour l'abonnement existant
-      const { data: updatedSubscription, error: updateError } = await supabase
-        .from('subscriptions')
-        .update({
-          tier: 'premium',
-          status: 'active',
-          plan_id: 'premium_admin',
-          billing_period: 'permanent',
-          expires_at: null,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', existingSubscription.id)
-        .select()
-        .single();
-
-      if (updateError) {
-        console.error('❌ Erreur mise à jour abonnement admin:', updateError);
-        return;
-      }
-
-      console.log('✅ Abonnement mis à jour vers Premium Admin:', updatedSubscription.plan_id);
-    }
-
-  } catch (error) {
-    console.error('❌ Erreur configuration abonnement admin:', error);
-    // Ne pas faire échouer l'authentification si l'abonnement échoue
-  }
-}
-
-// 🔧 AJOUTER MIDDLEWARE ADMIN (à la fin de la classe)
-static requireAdmin = async (req, res, next) => {
-  try {
-    if (!req.user) {
-      return res.status(401).json({ error: 'Authentification requise' });
-    }
-
-    const isAdmin = req.tokenData?.isAdmin || 
-                   req.user?.is_admin || 
-                   isAdminEmail(req.user?.email);
-
-    if (!isAdmin) {
-      return res.status(403).json({ 
-        error: 'Accès administrateur requis',
-        userEmail: req.user.email 
-      });
-    }
-
-    console.log('✅ Accès admin autorisé pour:', req.user.email);
-    req.isAdmin = true;
-    next();
-  } catch (error) {
-    console.error('❌ Erreur vérification admin:', error);
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
-};
-const jwt = require('jsonwebtoken');
-const { OAuth2Client } = require('google-auth-library');
-const { createClient } = require('@supabase/supabase-js');
-
 // Initialisation Supabase avec service key
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -166,7 +24,6 @@ const supabase = createClient(
 
 console.log("SUPABASE_URL:", process.env.SUPABASE_URL);
 console.log("SUPABASE_SERVICE_KEY preview:", process.env.SUPABASE_SERVICE_KEY?.substring(0,10) + "...");
-
 
 // Client Google OAuth
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -198,7 +55,86 @@ class AuthService {
   }
 
   // ===================================================================
-  // AUTHENTIFICATION AVEC GOOGLE (LA FONCTION MANQUANTE)
+  // 🆕 NOUVELLE MÉTHODE: Configuration abonnement Premium pour admins
+  // ===================================================================
+  async setupAdminPremiumSubscription(user) {
+    try {
+      console.log('👑 Configuration abonnement Premium admin pour:', user.email);
+
+      // Chercher un abonnement existant
+      let { data: existingSubscription, error: findError } = await supabase
+        .from('subscriptions')
+        .select('*')
+        .eq('user_id', user.id)
+        .single();
+
+      const adminSubscriptionData = {
+        user_id: user.id,
+        tier: 'premium',
+        status: 'active',
+        plan_id: 'premium_admin',
+        billing_period: 'permanent',
+        starts_at: new Date().toISOString(),
+        expires_at: null, // Pas d'expiration pour les admins
+        payment_id: 'admin_premium_permanent',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+
+      if (findError && findError.code !== 'PGRST116') {
+        console.error('❌ Erreur recherche abonnement:', findError);
+        // Continuer quand même, on va créer l'abonnement
+      }
+
+      if (!existingSubscription || findError) {
+        // Créer un nouvel abonnement admin
+        const { data: newSubscription, error: createError } = await supabase
+          .from('subscriptions')
+          .insert([adminSubscriptionData])
+          .select()
+          .single();
+
+        if (createError) {
+          console.error('❌ Erreur création abonnement admin:', createError);
+          // Si la table n'existe pas, continuer quand même
+          console.log('⚠️ Continuant sans abonnement en base (sera géré côté frontend)');
+          return;
+        }
+
+        console.log('✅ Abonnement Premium Admin créé:', newSubscription.plan_id);
+      } else {
+        // Mettre à jour l'abonnement existant
+        const { data: updatedSubscription, error: updateError } = await supabase
+          .from('subscriptions')
+          .update({
+            tier: 'premium',
+            status: 'active',
+            plan_id: 'premium_admin',
+            billing_period: 'permanent',
+            expires_at: null,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', existingSubscription.id)
+          .select()
+          .single();
+
+        if (updateError) {
+          console.error('❌ Erreur mise à jour abonnement admin:', updateError);
+          return;
+        }
+
+        console.log('✅ Abonnement mis à jour vers Premium Admin:', updatedSubscription.plan_id);
+      }
+
+    } catch (error) {
+      console.error('❌ Erreur configuration abonnement admin:', error);
+      // Ne pas faire échouer l'authentification si l'abonnement échoue
+      console.log('⚠️ Continuant sans abonnement en base (sera géré côté frontend)');
+    }
+  }
+
+  // ===================================================================
+  // AUTHENTIFICATION AVEC GOOGLE (MODIFIÉE POUR ADMIN)
   // ===================================================================
   async authenticateWithGoogle(googleToken) {
     try {
@@ -248,6 +184,7 @@ class AuthService {
             email: googleUser.email,
             name: googleUser.name,
             picture: googleUser.picture,
+            is_admin: isAdminEmail(googleUser.email), // 🔧 NOUVEAU : Marquer comme admin
             created_at: new Date().toISOString()
           }])
           .select()
@@ -258,22 +195,24 @@ class AuthService {
           throw new Error('Impossible de créer l\'utilisateur: ' + createError.message);
         }
 
-        // Créer abonnement gratuit par défaut
-        const { error: subscriptionError } = await supabase
-          .from('subscriptions')
-          .insert([{
-            user_id: newUser.id,
-            tier: 'free',
-            status: 'active',
-            created_at: new Date().toISOString()
-          }]);
+        // Créer abonnement gratuit par défaut (sauf si admin)
+        if (!isAdminEmail(googleUser.email)) {
+          const { error: subscriptionError } = await supabase
+            .from('subscriptions')
+            .insert([{
+              user_id: newUser.id,
+              tier: 'free',
+              status: 'active',
+              created_at: new Date().toISOString()
+            }]);
 
-        if (subscriptionError) {
-          console.warn('⚠️ Erreur création abonnement (non critique):', subscriptionError);
+          if (subscriptionError) {
+            console.warn('⚠️ Erreur création abonnement gratuit (non critique):', subscriptionError);
+          }
         }
 
         user = newUser;
-        console.log('✅ Utilisateur créé avec abonnement gratuit');
+        console.log('✅ Utilisateur créé:', user.email, user.is_admin ? '(ADMIN)' : '(USER)');
         
       } else if (fetchError) {
         console.error('❌ Erreur récupération utilisateur:', fetchError);
@@ -282,11 +221,14 @@ class AuthService {
         // Utilisateur existe, mettre à jour les infos
         console.log('🔄 Mise à jour utilisateur existant:', existingUser.email);
         
+        const shouldBeAdmin = isAdminEmail(existingUser.email);
+        
         const { data: updatedUser, error: updateError } = await supabase
           .from('users')
           .update({
             name: googleUser.name,
             picture: googleUser.picture,
+            is_admin: shouldBeAdmin, // 🔧 NOUVEAU : Mettre à jour le statut admin
             last_login: new Date().toISOString()
           })
           .eq('id', existingUser.id)
@@ -297,38 +239,50 @@ class AuthService {
           console.error('❌ Erreur mise à jour utilisateur:', updateError);
           // Continuer avec les données existantes
           user = existingUser;
+          // Mais s'assurer que is_admin est correct
+          user.is_admin = shouldBeAdmin;
         } else {
           user = updatedUser;
         }
+
+        console.log('✅ Utilisateur connecté:', user.email, user.is_admin ? '(ADMIN)' : '(USER)');
       }
 
-      // 3. Générer JWT
-      console.log('🎫 Génération JWT...');
+      // 3. 🆕 NOUVEAU: Configurer automatiquement Premium pour les admins
+      if (user.is_admin) {
+        console.log('👑 Admin détecté, configuration Premium automatique pour:', user.email);
+        await this.setupAdminPremiumSubscription(user); // 🔧 FIX: Maintenant dans une fonction async
+      }
+
+      // 4. Générer le token JWT avec information admin
       const jwtToken = jwt.sign(
         { 
           userId: user.id, 
           email: user.email,
           googleId: user.google_id,
+          isAdmin: user.is_admin, // 🔧 NOUVEAU : Inclure le statut admin dans le JWT
           iat: Math.floor(Date.now() / 1000)
         },
         process.env.JWT_SECRET,
-        { expiresIn: '7d' } // Token valide 7 jours
+        { expiresIn: '7d' }
       );
 
-      console.log('✅ JWT généré pour:', user.email);
+      console.log('✅ Authentification réussie:', user.email, user.is_admin ? '(ADMIN)' : '(USER)');
 
       return {
-        jwtToken,
+        success: true,
+        token: jwtToken,
         user: {
           id: user.id,
           email: user.email,
           name: user.name,
           picture: user.picture,
+          isAdmin: user.is_admin, // 🔧 NOUVEAU : Inclure dans la réponse
           createdAt: user.created_at,
-          lastLogin: user.last_login || user.created_at
+          lastLogin: user.last_login || new Date().toISOString()
         }
       };
-      
+
     } catch (error) {
       console.error('❌ Erreur authentification Google:', error);
       
@@ -389,7 +343,7 @@ class AuthService {
       // 3. Vérifier que l'utilisateur existe toujours
       const { data: user, error } = await supabase
         .from('users')
-        .select('id, email, name, picture, created_at, last_login')
+        .select('id, email, name, picture, created_at, last_login, is_admin')
         .eq('id', decoded.userId)
         .single();
 
@@ -411,6 +365,34 @@ class AuthService {
         error: 'Token invalide',
         code: 'TOKEN_ERROR'
       });
+    }
+  }
+
+  // 🆕 NOUVEAU : Middleware pour vérifier les droits admin
+  requireAdmin = async (req, res, next) => {
+    try {
+      if (!req.user) {
+        return res.status(401).json({ error: 'Authentification requise' });
+      }
+
+      // Vérifier si l'utilisateur est admin (dans le JWT ou dans la base)
+      const isAdmin = req.tokenData?.isAdmin || 
+                     req.user?.is_admin || 
+                     isAdminEmail(req.user?.email);
+
+      if (!isAdmin) {
+        return res.status(403).json({ 
+          error: 'Accès administrateur requis',
+          userEmail: req.user.email 
+        });
+      }
+
+      console.log('✅ Accès admin autorisé pour:', req.user.email);
+      req.isAdmin = true;
+      next();
+    } catch (error) {
+      console.error('❌ Erreur vérification admin:', error);
+      res.status(500).json({ error: 'Erreur serveur' });
     }
   }
 
@@ -478,6 +460,7 @@ class AuthService {
           userId: user.id, 
           email: user.email,
           googleId: user.google_id,
+          isAdmin: user.is_admin, // 🔧 NOUVEAU : Inclure le statut admin
           iat: Math.floor(Date.now() / 1000)
         },
         process.env.JWT_SECRET,
@@ -525,54 +508,55 @@ class AuthService {
   }
 
   // Obtenir les statistiques d'authentification
- // Remplacer la méthode getAuthStats() dans authService.js par :
+  async getAuthStats() {
+    try {
+      // CORRECTION: Récupérer les données utilisateurs
+      const { data: users, error, count } = await supabase
+        .from('users')
+        .select('created_at, last_login, is_admin', { count: 'exact' });
 
-async getAuthStats() {
-  try {
-    // CORRECTION: Récupérer les données utilisateurs
-    const { data: users, error, count } = await supabase
-      .from('users')
-      .select('created_at, last_login', { count: 'exact' });
+      if (error) {
+        console.error('❌ Erreur récupération statistiques:', error.message);
+        return {
+          totalUsers: 0,
+          newUsersToday: 0,
+          newUsersThisWeek: 0,
+          newUsersThisMonth: 0,
+          activeUsersToday: 0,
+          activeUsersThisWeek: 0,
+          adminUsers: 0 // 🔧 NOUVEAU
+        };
+      }
 
-    if (error) {
-      console.error('❌ Erreur récupération statistiques:', error.message);
+      console.log('✅ Statistiques récupérées, total users:', count);
+
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const thisWeek = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+      const thisMonth = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+      return {
+        totalUsers: count || 0,
+        newUsersToday: users ? users.filter(u => new Date(u.created_at) >= today).length : 0,
+        newUsersThisWeek: users ? users.filter(u => new Date(u.created_at) >= thisWeek).length : 0,
+        newUsersThisMonth: users ? users.filter(u => new Date(u.created_at) >= thisMonth).length : 0,
+        activeUsersToday: users ? users.filter(u => u.last_login && new Date(u.last_login) >= today).length : 0,
+        activeUsersThisWeek: users ? users.filter(u => u.last_login && new Date(u.last_login) >= thisWeek).length : 0,
+        adminUsers: users ? users.filter(u => u.is_admin === true).length : 0 // 🔧 NOUVEAU
+      };
+    } catch (error) {
+      console.error('❌ Erreur statistiques auth:', error);
       return {
         totalUsers: 0,
         newUsersToday: 0,
         newUsersThisWeek: 0,
         newUsersThisMonth: 0,
         activeUsersToday: 0,
-        activeUsersThisWeek: 0
+        activeUsersThisWeek: 0,
+        adminUsers: 0
       };
     }
-
-    console.log('✅ Statistiques récupérées, total users:', count);
-
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const thisWeek = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const thisMonth = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
-
-    return {
-      totalUsers: count || 0,
-      newUsersToday: users ? users.filter(u => new Date(u.created_at) >= today).length : 0,
-      newUsersThisWeek: users ? users.filter(u => new Date(u.created_at) >= thisWeek).length : 0,
-      newUsersThisMonth: users ? users.filter(u => new Date(u.created_at) >= thisMonth).length : 0,
-      activeUsersToday: users ? users.filter(u => u.last_login && new Date(u.last_login) >= today).length : 0,
-      activeUsersThisWeek: users ? users.filter(u => u.last_login && new Date(u.last_login) >= thisWeek).length : 0
-    };
-  } catch (error) {
-    console.error('❌ Erreur statistiques auth:', error);
-    return {
-      totalUsers: 0,
-      newUsersToday: 0,
-      newUsersThisWeek: 0,
-      newUsersThisMonth: 0,
-      activeUsersToday: 0,
-      activeUsersThisWeek: 0
-    };
   }
-}
 }
 
 // Export singleton
@@ -581,10 +565,10 @@ const authService = new AuthService();
 // Test de connexion au démarrage
 authService.testSupabaseConnection();
 
+// 🔧 NOUVEAU : Export des fonctions utilitaires
 module.exports = {
-  ...module.exports, // Garder les exports existants
+  ...authService,
   isAdminEmail,
-  requireAdmin: AuthService.requireAdmin
+  requireAdmin: authService.requireAdmin,
+  setupAdminPremiumSubscription: authService.setupAdminPremiumSubscription
 };
-
-module.exports = authService;
