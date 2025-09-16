@@ -1,163 +1,209 @@
 // ===================================================================
-// server.js - SERVEUR PRINCIPAL JOGOLINGA BACKEND
+// server.js - SERVEUR COMPLET AVEC FIX AUTHENTIFICATION ADMIN
 // ===================================================================
-require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const morgan = require('morgan');
 const { body, validationResult } = require('express-validator');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const app = express();
-const PORT = process.env.PORT || 3001;
+const compression = require('compression');
 
-// Vérification des variables d'environnement critiques
-const requiredEnvVars = [
-  'JWT_SECRET',
-  'SUPABASE_URL',
-  'SUPABASE_SERVICE_KEY',
-  'GOOGLE_CLIENT_ID'
-];
-
-requiredEnvVars.forEach(varName => {
-  if (!process.env[varName]) {
-    console.error(`❌ Variable d'environnement manquante: ${varName}`);
-    process.exit(1);
-  }
-});
-
-console.log('✅ Variables d\'environnement vérifiées');
-
-// Services
+// Import des services
 const authService = require('./services/authService');
 const subscriptionService = require('./services/subscriptionService');
 const audioService = require('./services/audioService');
 
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+console.log('🚀 Démarrage du serveur...');
+console.log('🌍 Environment:', process.env.NODE_ENV);
+console.log('🔧 Port:', PORT);
+
 // ===================================================================
-// MIDDLEWARE DE SÉCURITÉ
+// VÉRIFICATION DES VARIABLES D'ENVIRONNEMENT
 // ===================================================================
 
-// Protection générale
-app.use(helmet({
-  crossOriginEmbedderPolicy: false,
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      imgSrc: ["'self'", "data:", "https:"],
-      scriptSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      connectSrc: ["'self'", "https://api.stripe.com", "https://*.supabase.co"]
-    }
-  }
-}));
+const requiredEnvVars = [
+  'JWT_SECRET',
+  'GOOGLE_CLIENT_ID',
+  'GOOGLE_CLIENT_SECRET',
+  'SUPABASE_URL',
+  'SUPABASE_SERVICE_KEY'
+];
 
-// CORS sécurisé - VERSION CORRIGÉE
+const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+
+if (missingVars.length > 0) {
+  console.error('❌ Variables d\'environnement manquantes:', missingVars);
+  process.exit(1);
+} else {
+  console.log('✅ Variables d\'environnement vérifiées');
+}
+
+// ===================================================================
+// CONFIGURATION CORS
+// ===================================================================
+
 const allowedOrigins = [
+  'https://jogolinga-frontend.vercel.app',
+  'https://jogolinga-frontend-git-main-your-username.vercel.app',
+  'https://jogolinga-frontend-preview.vercel.app',
+  'https://*.vercel.app',
   'http://localhost:3000',
   'http://localhost:3001',
-  'https://localhost:3000',
-  'https://jogolinga-frontend.vercel.app',
   process.env.FRONTEND_URL,
   process.env.CORS_ORIGIN
 ].filter(Boolean);
 
-console.log('🔧 CORS - Origines autorisées:', allowedOrigins);
+console.log('🌐 Origins autorisées:', allowedOrigins);
 
-app.use(cors({
+const corsOptions = {
   origin: function (origin, callback) {
-    // Permettre les requêtes sans origin (mobile apps, postman, etc.)
-    if (!origin) {
-      console.log('🔓 CORS: Requête sans origin (autorisée)');
-      return callback(null, true);
-    }
+    // Autoriser les requêtes sans origin (applications mobiles, etc.)
+    if (!origin) return callback(null, true);
     
-    console.log('🔍 CORS: Origin reçue:', origin);
-    
-    if (allowedOrigins.includes(origin)) {
-      console.log('✅ CORS: Origin acceptée:', origin);
+    // Vérifier si l'origin est autorisée
+    const isAllowed = allowedOrigins.some(allowedOrigin => {
+      if (allowedOrigin.includes('*')) {
+        const pattern = allowedOrigin.replace('*', '.*');
+        return new RegExp(pattern).test(origin);
+      }
+      return allowedOrigin === origin;
+    });
+
+    if (isAllowed) {
       callback(null, true);
     } else {
-      console.warn(`❌ CORS: Origine rejetée: ${origin}`);
-      console.log('📋 CORS: Origines autorisées:', allowedOrigins);
-      callback(new Error('Non autorisé par CORS'));
+      console.warn('❌ Origin non autorisée:', origin);
+      callback(new Error('Not allowed by CORS'));
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  optionsSuccessStatus: 200
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'Accept',
+    'Origin',
+    'X-Requested-With'
+  ]
+};
+
+// ===================================================================
+// MIDDLEWARES GLOBAUX
+// ===================================================================
+
+// Sécurité
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"],
+    },
+  },
+  crossOriginEmbedderPolicy: false
 }));
 
-// Middleware pour les preflight requests
-app.options('*', (req, res) => {
-  console.log('🔄 CORS: Preflight request pour:', req.path);
-  res.sendStatus(200);
-});
+// CORS
+app.use(cors(corsOptions));
 
-// Rate limiting global
-const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100,
-  message: { error: 'Trop de requêtes, réessayez dans 15 minutes' },
-  standardHeaders: true,
-  legacyHeaders: false
-});
+// Compression
+app.use(compression());
 
-// Rate limiting strict pour authentification
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10, // Augmenté de 5 à 10 pour les tests
-  message: { error: 'Trop de tentatives de connexion, réessayez dans 15 minutes' }
-});
-
-app.use('/api/', globalLimiter);
-app.use('/api/auth/', authLimiter);
-
-// Middleware général
-app.use(morgan('combined'));
+// Parsing JSON
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limite chaque IP à 100 requêtes par windowMs
+  message: {
+    error: 'Trop de requêtes depuis cette IP, réessayez dans 15 minutes.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use(limiter);
+
+// Rate limiting spécial pour l'authentification
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: {
+    error: 'Trop de tentatives d\'authentification, réessayez dans 15 minutes.'
+  }
+});
+
+// Middleware de logging pour debug
+app.use((req, res, next) => {
+  if (req.path.includes('/api/auth')) {
+    console.log(`🔍 AUTH REQUEST: ${req.method} ${req.path}`);
+    console.log('🔍 Origin:', req.get('Origin'));
+    console.log('🔍 User-Agent:', req.get('User-Agent'));
+  }
+  next();
+});
 
 // ===================================================================
 // ROUTES DE SANTÉ
 // ===================================================================
 
-// Health check basique
-app.get('/api/health', (req, res) => {
-  console.log('🩺 Health check demandé');
+app.get('/', (req, res) => {
   res.json({
-    status: 'OK',
-    message: 'JogoLinga Backend is running',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development',
-    uptime: Math.floor(process.uptime()),
-    version: '1.0.0'
+    message: 'Jogolinga Backend API',
+    version: '1.0.0',
+    status: 'running',
+    timestamp: new Date().toISOString()
   });
 });
 
-// Status détaillé (pour monitoring)
-app.get('/api/status', async (req, res) => {
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+// ===================================================================
+// 🔧 ROUTE DE TEST AUTH SERVICE (TEMPORAIRE)
+// ===================================================================
+
+app.get('/api/test-auth-service', async (req, res) => {
   try {
-    console.log('📊 Status détaillé demandé');
-    const status = {
-      server: 'healthy',
-      database: await subscriptionService.checkDatabaseHealth(),
-      supabase: !!process.env.SUPABASE_URL,
-      stripe: !!process.env.STRIPE_SECRET_KEY,
-      google: !!process.env.GOOGLE_CLIENT_ID,
-      cors: allowedOrigins,
-      timestamp: new Date().toISOString(),
-      uptime: Math.floor(process.uptime())
-    };
+    console.log('🧪 Test authService...');
     
-    res.json(status);
+    // Test de la méthode
+    if (typeof authService.authenticateWithGoogle !== 'function') {
+      throw new Error('authService.authenticateWithGoogle n\'est pas une fonction');
+    }
+    
+    console.log('✅ authService.authenticateWithGoogle existe');
+    console.log('✅ authService type:', typeof authService);
+    console.log('✅ authService methods:', Object.getOwnPropertyNames(Object.getPrototypeOf(authService)));
+    
+    res.json({
+      success: true,
+      message: 'authService est correctement configuré',
+      hasAuthenticateWithGoogle: typeof authService.authenticateWithGoogle === 'function',
+      authServiceType: typeof authService,
+      methods: Object.getOwnPropertyNames(Object.getPrototypeOf(authService))
+    });
+    
   } catch (error) {
-    console.error('❌ Erreur status:', error);
-    res.status(500).json({ 
-      error: 'Erreur de status',
-      timestamp: new Date().toISOString()
+    console.error('❌ Test authService échoué:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
@@ -166,8 +212,8 @@ app.get('/api/status', async (req, res) => {
 // ROUTES D'AUTHENTIFICATION
 // ===================================================================
 
-// Connexion Google
-app.post('/api/auth/google', [
+// 🔧 ROUTE GOOGLE AUTH CORRIGÉE
+app.post('/api/auth/google', authLimiter, [
   body('googleToken').notEmpty().withMessage('Token Google requis'),
   body('googleToken').isLength({ min: 100 }).withMessage('Token Google invalide')
 ], async (req, res) => {
@@ -180,6 +226,7 @@ app.post('/api/auth/google', [
     if (!errors.isEmpty()) {
       console.log('❌ Validation échouée:', errors.array());
       return res.status(400).json({ 
+        success: false,
         error: 'Données invalides', 
         details: errors.array() 
       });
@@ -187,118 +234,122 @@ app.post('/api/auth/google', [
 
     const { googleToken } = req.body;
     console.log('🎫 Token Google reçu (longueur):', googleToken.length);
+    console.log('🎫 Token Google preview:', googleToken.substring(0, 50) + '...');
+    
+    // 🔧 FIX PRINCIPAL: Appeler la méthode correctement
+    console.log('📞 Appel authService.authenticateWithGoogle...');
+    
+    if (typeof authService.authenticateWithGoogle !== 'function') {
+      console.error('❌ authService.authenticateWithGoogle n\'est pas une fonction');
+      throw new Error('Service d\'authentification non disponible');
+    }
     
     const result = await authService.authenticateWithGoogle(googleToken);
     
-    console.log('✅ Connexion Google réussie pour:', result.user.email);
-    
-    res.json({
-      success: true,
-      token: result.jwtToken,
-      user: result.user
+    console.log('✅ Résultat authService reçu:', {
+      success: result.success,
+      hasToken: !!result.token,
+      hasUser: !!result.user,
+      userEmail: result.user?.email,
+      isAdmin: result.user?.isAdmin
     });
+
+    // 🔧 VALIDATION: S'assurer que le résultat a le bon format
+    if (!result || typeof result !== 'object') {
+      console.error('❌ Résultat authService invalide (pas un objet):', typeof result);
+      throw new Error('Format de réponse invalide');
+    }
+    
+    if (!result.success || !result.token || !result.user) {
+      console.error('❌ Format de réponse authService incomplet:', {
+        hasSuccess: !!result.success,
+        hasToken: !!result.token,
+        hasUser: !!result.user
+      });
+      return res.status(500).json({
+        success: false,
+        error: 'Erreur interne de format de réponse'
+      });
+    }
+    
+    console.log('✅ Connexion Google réussie pour:', result.user.email, result.user.isAdmin ? '(ADMIN)' : '(USER)');
+    
+    // 🔧 IMPORTANT: Retourner directement le résultat (déjà au bon format)
+    res.json(result);
+    
   } catch (error) {
-    console.error('❌ Erreur authentification:', error.message);
+    console.error('❌ Erreur authentification complète:', {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
+    
+    // 🔧 IMPORTANT: Format d'erreur cohérent
     res.status(401).json({ 
+      success: false,
       error: 'Authentification échouée',
-      message: 'Token Google invalide ou expiré',
+      message: error.message,
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
 
-// Vérification du token JWT
-app.get('/api/auth/verify', authService.verifyToken, (req, res) => {
-  console.log('✅ Token JWT vérifié pour:', req.user.email);
+// Vérification de token
+app.post('/api/auth/verify', authService.verifyToken, (req, res) => {
   res.json({
     valid: true,
     user: req.user
   });
 });
 
-// Déconnexion
-app.post('/api/auth/logout', authService.verifyToken, (req, res) => {
-  console.log('🚪 Déconnexion utilisateur:', req.user.email);
-  res.json({ success: true, message: 'Déconnecté avec succès' });
-});
-
 // ===================================================================
-// ROUTES D'ABONNEMENT SÉCURISÉES
+// ROUTES D'ABONNEMENT
 // ===================================================================
 
-// Vérifier l'abonnement actuel
+// Vérifier le statut d'abonnement
 app.get('/api/subscription/verify', authService.verifyToken, async (req, res) => {
   try {
-    console.log('🔍 Vérification abonnement pour:', req.user.email);
     const subscription = await subscriptionService.verifyUserSubscription(req.user.id);
     res.json(subscription);
   } catch (error) {
     console.error('❌ Erreur vérification abonnement:', error);
-    res.status(500).json({ error: 'Erreur serveur lors de la vérification' });
+    res.status(500).json({ error: error.message });
   }
 });
 
 // Vérifier l'accès à une fonctionnalité
-app.post('/api/subscription/check-access', [
-  authService.verifyToken,
-  body('feature').notEmpty().withMessage('Feature requis')
-], async (req, res) => {
+app.post('/api/subscription/check-access', authService.verifyToken, async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ 
-        error: 'Données invalides', 
-        details: errors.array() 
-      });
-    }
-
     const { feature } = req.body;
-    console.log(`🔑 Vérification accès feature "${feature}" pour:`, req.user.email);
-    
     const access = await subscriptionService.checkFeatureAccess(req.user.id, feature);
     res.json(access);
   } catch (error) {
     console.error('❌ Erreur vérification accès:', error);
-    res.status(500).json({ error: 'Erreur serveur' });
+    res.status(500).json({ error: error.message });
   }
 });
 
 // ===================================================================
-// ROUTES DE PAIEMENT STRIPE (SÉCURISÉES)
+// ROUTES DE PAIEMENT
 // ===================================================================
 
-// Créer une session de checkout
-app.post('/api/payments/create-checkout-session', [
-  authService.verifyToken,
-  body('planId').notEmpty().withMessage('Plan ID requis'),
-  body('priceId').notEmpty().withMessage('Price ID requis')
-], async (req, res) => {
+// Créer une session de paiement
+app.post('/api/payments/create-checkout-session', authService.verifyToken, async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ 
-        error: 'Données invalides', 
-        details: errors.array() 
-      });
-    }
-
     const { planId, priceId } = req.body;
-    console.log(`💳 Création session Stripe pour ${req.user.email}, plan: ${planId}`);
-
+    const userEmail = req.user.email;
+    
     const sessionId = await subscriptionService.createCheckoutSession({
       userId: req.user.id,
-      userEmail: req.user.email,
-      planId,
-      priceId,
-      successUrl: `${process.env.FRONTEND_URL}/payment-success`,
-      cancelUrl: `${process.env.FRONTEND_URL}/subscription`
+      userEmail: userEmail,
+      planId: planId,
+      priceId: priceId
     });
-
-    console.log('✅ Session Stripe créée:', sessionId);
+    
     res.json({ sessionId });
   } catch (error) {
-    console.error('❌ Erreur création session:', error);
-    res.status(500).json({ error: 'Impossible de créer la session de paiement' });
+    console.error('❌ Erreur création session paiement:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -306,105 +357,155 @@ app.post('/api/payments/create-checkout-session', [
 app.get('/api/payments/verify-payment', authService.verifyToken, async (req, res) => {
   try {
     const { sessionId } = req.query;
-    console.log(`💰 Vérification paiement session: ${sessionId}`);
-    
-    if (!sessionId) {
-      return res.status(400).json({ error: 'Session ID requis' });
-    }
-
     const result = await subscriptionService.verifyPayment(sessionId, req.user.id);
-    console.log('✅ Paiement vérifié:', result.status);
     res.json(result);
   } catch (error) {
     console.error('❌ Erreur vérification paiement:', error);
-    res.status(500).json({ error: 'Erreur lors de la vérification du paiement' });
+    res.status(500).json({ error: error.message });
   }
 });
 
 // ===================================================================
-// ROUTES AUDIO SÉCURISÉES
+// ROUTES ADMIN
+// ===================================================================
+
+// Vérifier l'accès admin
+app.get('/api/admin/check-access', authService.verifyToken, async (req, res) => {
+  try {
+    const isAdmin = req.tokenData?.isAdmin || 
+                   req.user?.is_admin || 
+                   authService.isAdminEmail(req.user?.email);
+
+    console.log(`🔍 Vérification accès admin pour ${req.user?.email}:`, isAdmin);
+
+    res.json({
+      isAdmin,
+      adminFeatures: isAdmin ? [
+        'user_management',
+        'subscription_stats', 
+        'payment_history',
+        'system_config',
+        'admin_dashboard'
+      ] : [],
+      user: {
+        email: req.user?.email,
+        isAdmin
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Erreur vérification admin:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Statistiques admin
+app.get('/api/admin/stats', authService.verifyToken, authService.requireAdmin, async (req, res) => {
+  try {
+    console.log('📊 Récupération statistiques admin par:', req.user.email);
+
+    // Statistiques utilisateurs
+    const userStats = await authService.getAuthStats();
+    
+    // Statistiques abonnements
+    const subscriptionStats = await subscriptionService.getSubscriptionStats();
+
+    const stats = {
+      users: userStats,
+      subscriptions: subscriptionStats,
+      system: {
+        environment: process.env.NODE_ENV || 'development',
+        timestamp: new Date().toISOString(),
+        adminUser: req.user.email
+      }
+    };
+
+    console.log('✅ Statistiques admin générées pour:', req.user.email);
+    res.json(stats);
+
+  } catch (error) {
+    console.error('❌ Erreur récupération statistiques admin:', error);
+    res.status(500).json({ 
+      error: 'Erreur récupération des statistiques',
+      details: error.message 
+    });
+  }
+});
+
+// ===================================================================
+// ROUTES AUDIO
 // ===================================================================
 
 // Rechercher des audios
-app.post('/api/audio/search', [
-  authService.verifyToken,
-  body('languageCode').optional().isLength({ min: 2, max: 3 }),
-  body('category').optional().isLength({ min: 1, max: 50 }),
-  body('word').optional().isLength({ min: 1, max: 100 })
-], async (req, res) => {
+app.get('/api/audio/search', async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ 
-        error: 'Paramètres de recherche invalides', 
-        details: errors.array() 
-      });
-    }
-
-    const { languageCode, category, word } = req.body;
-    console.log(`🎵 Recherche audio: ${languageCode}/${category}/${word || 'all'}`);
+    const { languageCode, category, word, sentence, limit, offset } = req.query;
     
-    const results = await audioService.searchAudio({ languageCode, category, word });
+    const results = await audioService.searchAudio({
+      languageCode,
+      category,
+      word,
+      sentence,
+      limit: parseInt(limit) || 50,
+      offset: parseInt(offset) || 0
+    });
     
-    console.log(`✅ Trouvé ${results.length} audios`);
-    res.json({ results });
+    res.json(results);
   } catch (error) {
     console.error('❌ Erreur recherche audio:', error);
-    res.status(500).json({ error: 'Erreur lors de la recherche audio' });
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Obtenir l'audio d'un mot
+app.get('/api/audio/word/:languageCode/:word', async (req, res) => {
+  try {
+    const { languageCode, word } = req.params;
+    const audio = await audioService.getWordAudio(languageCode, word);
+    
+    if (audio) {
+      res.json(audio);
+    } else {
+      res.status(404).json({ error: 'Audio non trouvé' });
+    }
+  } catch (error) {
+    console.error('❌ Erreur récupération audio mot:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
 // Statistiques audio
-app.get('/api/audio/stats', authService.verifyToken, async (req, res) => {
+app.get('/api/audio/stats', async (req, res) => {
   try {
-    console.log('📊 Récupération statistiques audio');
     const stats = await audioService.getAudioStats();
     res.json(stats);
   } catch (error) {
     console.error('❌ Erreur statistiques audio:', error);
-    res.status(500).json({ error: 'Erreur lors de la récupération des statistiques' });
+    res.status(500).json({ error: error.message });
   }
 });
 
 // ===================================================================
-// ROUTES DE PROGRESSION UTILISATEUR
+// ROUTES DE PROGRESSION
 // ===================================================================
 
 // Sauvegarder la progression
-app.post('/api/progress/save', [
-  authService.verifyToken,
-  body('languageCode').notEmpty().withMessage('Code langue requis'),
-  body('progressData').isObject().withMessage('Données de progression requises')
-], async (req, res) => {
+app.post('/api/progress/save', authService.verifyToken, async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ 
-        error: 'Données de progression invalides', 
-        details: errors.array() 
-      });
-    }
-
     const { languageCode, progressData, totalXP, completedCategories } = req.body;
-    console.log(`💾 Sauvegarde progression ${languageCode} pour:`, req.user.email);
     
     const result = await subscriptionService.saveUserProgress({
       userId: req.user.id,
       languageCode,
       progressData,
-      totalXP: totalXP || 0,
-      completedCategories: completedCategories || []
+      totalXP,
+      completedCategories
     });
-
-    console.log('✅ Progression sauvegardée');
-    res.json({ 
-      success: true, 
-      saved: true,
-      timestamp: Date.now()
-    });
+    
+    res.json({ success: result });
   } catch (error) {
     console.error('❌ Erreur sauvegarde progression:', error);
-    res.status(500).json({ error: 'Erreur lors de la sauvegarde' });
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -413,170 +514,112 @@ app.get('/api/progress/:languageCode', authService.verifyToken, async (req, res)
   try {
     const { languageCode } = req.params;
     
-    if (!languageCode || languageCode.length < 2) {
-      return res.status(400).json({ error: 'Code langue invalide' });
-    }
-
-    console.log(`📂 Chargement progression ${languageCode} pour:`, req.user.email);
     const progress = await subscriptionService.getUserProgress(req.user.id, languageCode);
-    res.json(progress || null);
+    
+    if (progress) {
+      res.json(progress);
+    } else {
+      res.status(404).json({ error: 'Progression non trouvée' });
+    }
   } catch (error) {
     console.error('❌ Erreur chargement progression:', error);
-    res.status(500).json({ error: 'Erreur lors du chargement' });
+    res.status(500).json({ error: error.message });
   }
 });
 
 // ===================================================================
-// ROUTE DE TEST POUR DEBUG CORS
+// WEBHOOKS STRIPE
 // ===================================================================
 
-// Route de test simple pour debug CORS
-app.get('/api/test', (req, res) => {
-  console.log('🧪 Route de test appelée');
-  console.log('🌐 Origin:', req.get('Origin'));
-  console.log('🔍 Headers:', req.headers);
-  
-  res.json({
-    message: 'Test CORS réussi !',
-    origin: req.get('Origin'),
-    timestamp: new Date().toISOString(),
-    headers: req.headers
-  });
-});
-
-// ===================================================================
-// WEBHOOKS STRIPE (sans authentification)
-// ===================================================================
-
-// Webhook Stripe (endpoint raw pour signature)
-app.post('/api/stripe/webhook', express.raw({type: 'application/json'}), async (req, res) => {
-  const sig = req.headers['stripe-signature'];
-  
+app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
-    console.log('🪝 Webhook Stripe reçu');
+    const sig = req.headers['stripe-signature'];
     
-    // Vérification signature Stripe
-    let event;
-    try {
-      event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-    } catch (err) {
-      console.error('❌ Signature webhook invalide:', err.message);
-      return res.status(400).send(`Webhook signature error: ${err.message}`);
-    }
-
-    // Traiter l'événement
+    // Validation du webhook Stripe
+    const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+    const event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    
+    console.log('🎣 Webhook Stripe reçu:', event.type);
+    
+    // Traitement des événements
     switch (event.type) {
-      case 'checkout.session.completed':
-        console.log('💳 Paiement complété:', event.data.object.id);
-        // Traiter le paiement
-        break;
       case 'customer.subscription.updated':
-        console.log('🔄 Abonnement mis à jour:', event.data.object.id);
         await subscriptionService.handleSubscriptionUpdate(event.data.object);
         break;
+        
       case 'customer.subscription.deleted':
-        console.log('❌ Abonnement annulé:', event.data.object.id);
         await subscriptionService.handleSubscriptionCancellation(event.data.object);
         break;
+        
+      case 'payment_intent.succeeded':
+        await subscriptionService.handleSuccessfulPayment(event.data.object);
+        break;
+        
       default:
-        console.log(`⚠️ Événement webhook non géré: ${event.type}`);
+        console.log('⚠️ Événement Stripe non géré:', event.type);
     }
-
-    res.json({received: true});
+    
+    res.json({ received: true });
   } catch (error) {
-    console.error('❌ Erreur webhook:', error);
-    res.status(500).json({error: 'Erreur traitement webhook'});
+    console.error('❌ Erreur webhook Stripe:', error);
+    res.status(400).json({ error: error.message });
   }
 });
 
 // ===================================================================
-// ROUTES 404 ET GESTION D'ERREURS
+// GESTION D'ERREURS
 // ===================================================================
 
-// 404 Handler
-app.use((req, res) => {
-  console.log(`❓ Route non trouvée: ${req.method} ${req.path} depuis ${req.get('Origin')}`);
-  res.status(404).json({ 
+// Gestionnaire d'erreurs 404
+app.use('*', (req, res) => {
+  res.status(404).json({
     error: 'Route non trouvée',
-    path: req.path,
-    method: req.method,
-    timestamp: new Date().toISOString(),
-    availableRoutes: [
-      'GET /api/health',
-      'GET /api/status', 
-      'POST /api/auth/google',
-      'GET /api/auth/verify',
-      'GET /api/test'
-    ]
+    path: req.originalUrl,
+    method: req.method
   });
 });
 
-// Error Handler Global
+// Gestionnaire d'erreurs global
 app.use((error, req, res, next) => {
-  console.error('💥 Erreur serveur:', error.message);
-  console.error('📍 Stack:', error.stack);
-  
-  // CORS errors
-  if (error.message.includes('CORS')) {
-    console.error('🚫 Erreur CORS détectée pour origin:', req.get('Origin'));
-    return res.status(403).json({
-      error: 'Accès CORS refusé',
-      message: 'Origine non autorisée',
-      origin: req.get('Origin'),
-      allowedOrigins: allowedOrigins
-    });
-  }
-  
-  // Ne pas exposer les détails d'erreur en production
-  const isDevelopment = process.env.NODE_ENV !== 'production';
+  console.error('❌ Erreur serveur:', {
+    message: error.message,
+    stack: error.stack,
+    url: req.url,
+    method: req.method
+  });
   
   res.status(error.status || 500).json({
-    error: 'Erreur interne du serveur',
-    message: isDevelopment ? error.message : 'Une erreur est survenue',
-    timestamp: new Date().toISOString(),
-    ...(isDevelopment && { stack: error.stack })
+    error: error.message || 'Erreur serveur interne',
+    ...(process.env.NODE_ENV === 'development' && { stack: error.stack })
   });
+});
+
+// Gestion des signaux de fermeture
+process.on('SIGTERM', () => {
+  console.log('🛑 SIGTERM reçu, arrêt du serveur...');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('🛑 SIGINT reçu, arrêt du serveur...');
+  process.exit(0);
 });
 
 // ===================================================================
 // DÉMARRAGE DU SERVEUR
 // ===================================================================
 
-const server = app.listen(PORT, () => {
-  console.log('\n🚀 ===================================');
-  console.log('🎵 JogoLinga Backend démarré !');
-  console.log('🚀 ===================================');
-  console.log(`📡 Port: ${PORT}`);
-  console.log(`🔗 API: http://localhost:${PORT}/api/health`);
-  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`⚡ Stripe: ${process.env.STRIPE_SECRET_KEY ? '✅ Configuré' : '❌ Manquant'}`);
-  console.log(`🗄️  Supabase: ${process.env.SUPABASE_URL ? '✅ Configuré' : '❌ Manquant'}`);
-  console.log(`🔑 JWT: ${process.env.JWT_SECRET ? '✅ Configuré' : '❌ Manquant'}`);
-  console.log(`🔐 Google: ${process.env.GOOGLE_CLIENT_ID ? '✅ Configuré' : '❌ Manquant'}`);
-  console.log(`🌐 CORS Origins:`, allowedOrigins);
-  console.log(`🎯 Frontend URL: ${process.env.FRONTEND_URL || 'Non défini'}`);
-  console.log('=====================================\n');
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('🛑 Arrêt du serveur...');
-  server.close(() => {
-    console.log('✅ Serveur arrêté proprement');
-    process.exit(0);
-  });
-});
-
-// Gestion des erreurs non capturées
-process.on('uncaughtException', (error) => {
-  console.error('💥 Uncaught Exception:', error);
-  process.exit(1);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
-  process.exit(1);
+app.listen(PORT, () => {
+  console.log(`✅ Serveur démarré sur le port ${PORT}`);
+  console.log(`🌍 URL de base: http://localhost:${PORT}`);
+  console.log(`🔍 Health check: http://localhost:${PORT}/api/health`);
+  console.log(`🧪 Test authService: http://localhost:${PORT}/api/test-auth-service`);
+  console.log('📝 Routes disponibles:');
+  console.log('   - POST /api/auth/google');
+  console.log('   - GET  /api/subscription/verify');
+  console.log('   - GET  /api/admin/check-access');
+  console.log('   - GET  /api/audio/search');
+  console.log('🚀 Serveur prêt !');
 });
 
 module.exports = app;
-
