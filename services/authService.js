@@ -1,6 +1,159 @@
 // ===================================================================
 // services/authService.js - SERVICE D'AUTHENTIFICATION BACKEND SÉCURISÉ
 // ===================================================================
+
+
+const ADMIN_EMAILS = [
+  'badji.denany@gmail.com'
+];
+
+const isAdminEmail = (email) => {
+  return ADMIN_EMAILS.includes(email?.toLowerCase());
+};
+
+console.log('👑 Configuration Admin Backend - Emails autorisés:', ADMIN_EMAILS);
+
+// 🔧 DANS LA CLASSE AuthService, MODIFIER LA MÉTHODE authenticateWithGoogle
+// Trouvez votre méthode existante et remplacez la section après "// 3. Générer le JWT" par :
+
+// 3. 🆕 NOUVEAU: Vérifier si c'est un admin et configurer Premium automatiquement
+const isAdmin = isAdminEmail(user.email);
+
+if (isAdmin) {
+  console.log('👑 Admin détecté, configuration Premium automatique pour:', user.email);
+  await this.setupAdminPremiumSubscription(user);
+}
+
+// 4. Générer le JWT avec statut admin
+const jwtToken = jwt.sign(
+  { 
+    userId: user.id, 
+    email: user.email,
+    googleId: user.google_id,
+    isAdmin: isAdmin, // 🔧 IMPORTANT: Inclure le statut admin
+    iat: Math.floor(Date.now() / 1000)
+  },
+  process.env.JWT_SECRET,
+  { expiresIn: '7d' }
+);
+
+console.log('✅ Authentification réussie:', user.email, isAdmin ? '(ADMIN)' : '(USER)');
+
+return {
+  success: true,
+  token: jwtToken,
+  user: {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    picture: user.picture,
+    isAdmin: isAdmin, // 🔧 IMPORTANT: Inclure dans la réponse
+    createdAt: user.created_at,
+    lastLogin: user.last_login || new Date().toISOString()
+  }
+};
+
+// 🆕 AJOUTER CETTE NOUVELLE MÉTHODE DANS LA CLASSE AuthService
+async setupAdminPremiumSubscription(user) {
+  try {
+    console.log('👑 Configuration abonnement Premium admin pour:', user.email);
+
+    // Chercher un abonnement existant
+    let { data: existingSubscription, error: findError } = await supabase
+      .from('subscriptions')
+      .select('*')
+      .eq('user_id', user.id)
+      .single();
+
+    const adminSubscriptionData = {
+      user_id: user.id,
+      tier: 'premium',
+      status: 'active',
+      plan_id: 'premium_admin',
+      billing_period: 'permanent',
+      starts_at: new Date().toISOString(),
+      expires_at: null, // Pas d'expiration pour les admins
+      payment_id: 'admin_premium_permanent',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+
+    if (findError && findError.code !== 'PGRST116') {
+      console.error('❌ Erreur recherche abonnement:', findError);
+      // Continuer quand même, on va créer l'abonnement
+    }
+
+    if (!existingSubscription || findError) {
+      // Créer un nouvel abonnement admin
+      const { data: newSubscription, error: createError } = await supabase
+        .from('subscriptions')
+        .insert([adminSubscriptionData])
+        .select()
+        .single();
+
+      if (createError) {
+        console.error('❌ Erreur création abonnement admin:', createError);
+        // Si la table n'existe pas, créer quand même localement
+        return;
+      }
+
+      console.log('✅ Abonnement Premium Admin créé:', newSubscription.plan_id);
+    } else {
+      // Mettre à jour l'abonnement existant
+      const { data: updatedSubscription, error: updateError } = await supabase
+        .from('subscriptions')
+        .update({
+          tier: 'premium',
+          status: 'active',
+          plan_id: 'premium_admin',
+          billing_period: 'permanent',
+          expires_at: null,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', existingSubscription.id)
+        .select()
+        .single();
+
+      if (updateError) {
+        console.error('❌ Erreur mise à jour abonnement admin:', updateError);
+        return;
+      }
+
+      console.log('✅ Abonnement mis à jour vers Premium Admin:', updatedSubscription.plan_id);
+    }
+
+  } catch (error) {
+    console.error('❌ Erreur configuration abonnement admin:', error);
+    // Ne pas faire échouer l'authentification si l'abonnement échoue
+  }
+}
+
+// 🔧 AJOUTER MIDDLEWARE ADMIN (à la fin de la classe)
+static requireAdmin = async (req, res, next) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentification requise' });
+    }
+
+    const isAdmin = req.tokenData?.isAdmin || 
+                   req.user?.is_admin || 
+                   isAdminEmail(req.user?.email);
+
+    if (!isAdmin) {
+      return res.status(403).json({ 
+        error: 'Accès administrateur requis',
+        userEmail: req.user.email 
+      });
+    }
+
+    console.log('✅ Accès admin autorisé pour:', req.user.email);
+    req.isAdmin = true;
+    next();
+  } catch (error) {
+    console.error('❌ Erreur vérification admin:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+};
 const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
 const { createClient } = require('@supabase/supabase-js');
@@ -427,5 +580,11 @@ const authService = new AuthService();
 
 // Test de connexion au démarrage
 authService.testSupabaseConnection();
+
+module.exports = {
+  ...module.exports, // Garder les exports existants
+  isAdminEmail,
+  requireAdmin: AuthService.requireAdmin
+};
 
 module.exports = authService;
