@@ -1,13 +1,10 @@
 // ===================================================================
-// server.js - SERVEUR COMPLET AVEC FIX AUTHENTIFICATION ADMIN
+// server.js - SERVEUR AVEC DÉPENDANCES EXISTANTES UNIQUEMENT
 // ===================================================================
 
 const express = require('express');
 const cors = require('cors');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
 const { body, validationResult } = require('express-validator');
-const compression = require('compression');
 
 // Import des services
 const authService = require('./services/authService');
@@ -95,50 +92,12 @@ const corsOptions = {
 // MIDDLEWARES GLOBAUX
 // ===================================================================
 
-// Sécurité
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      scriptSrc: ["'self'"],
-      imgSrc: ["'self'", "data:", "https:"],
-    },
-  },
-  crossOriginEmbedderPolicy: false
-}));
-
 // CORS
 app.use(cors(corsOptions));
-
-// Compression
-app.use(compression());
 
 // Parsing JSON
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limite chaque IP à 100 requêtes par windowMs
-  message: {
-    error: 'Trop de requêtes depuis cette IP, réessayez dans 15 minutes.'
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-app.use(limiter);
-
-// Rate limiting spécial pour l'authentification
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  message: {
-    error: 'Trop de tentatives d\'authentification, réessayez dans 15 minutes.'
-  }
-});
 
 // Middleware de logging pour debug
 app.use((req, res, next) => {
@@ -213,7 +172,7 @@ app.get('/api/test-auth-service', async (req, res) => {
 // ===================================================================
 
 // 🔧 ROUTE GOOGLE AUTH CORRIGÉE
-app.post('/api/auth/google', authLimiter, [
+app.post('/api/auth/google', [
   body('googleToken').notEmpty().withMessage('Token Google requis'),
   body('googleToken').isLength({ min: 100 }).withMessage('Token Google invalide')
 ], async (req, res) => {
@@ -374,7 +333,7 @@ app.get('/api/admin/check-access', authService.verifyToken, async (req, res) => 
   try {
     const isAdmin = req.tokenData?.isAdmin || 
                    req.user?.is_admin || 
-                   authService.isAdminEmail(req.user?.email);
+                   authService.isAdminEmail?.(req.user?.email);
 
     console.log(`🔍 Vérification accès admin pour ${req.user?.email}:`, isAdmin);
 
