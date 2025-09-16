@@ -237,63 +237,64 @@ class SubscriptionService {
 
   // Créer une session de paiement Stripe avec URLs corrigées
   async createCheckoutSession({ userId, userEmail, planId, priceId, successPath = '/payment-success', cancelPath = '/payment-cancel' }) {
-    try {
-      console.log(`💳 Création session Stripe pour userId: ${userId}, planId: ${planId}`);
-      
-      // Vérifier que l'utilisateur existe
-      const { data: user, error: userError } = await supabase
-        .from('users')
-        .select('id, email')
-        .eq('id', userId)
-        .single();
+  try {
+    console.log(`💳 Création session Stripe pour userId: ${userId}, planId: ${planId}`);
+    
+    // Vérifier que l'utilisateur existe
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id, email')
+      .eq('id', userId)
+      .single();
 
-      if (userError || !user) {
-        throw new Error('Utilisateur non trouvé');
-      }
+    if (userError || !user) {
+      throw new Error('Utilisateur non trouvé');
+    }
 
-      // Construire les URLs complètes avec schéma explicite
-      const successUrl = this.constructFullUrl(successPath);
-      const cancelUrl = this.constructFullUrl(cancelPath);
+    // Construire les URLs complètes avec schéma explicite
+    const successUrl = this.constructFullUrl(successPath);
+    const cancelUrl = this.constructFullUrl(cancelPath);
 
-      console.log('🔗 URLs générées:', { successUrl, cancelUrl });
+    console.log('🔗 URLs générées:', { successUrl, cancelUrl });
 
-      // Créer la session Stripe avec URLs corrigées
-      const session = await stripe.checkout.sessions.create({
-        payment_method_types: ['card'],
-        line_items: [{
-          price: priceId,
-          quantity: 1,
-        }],
-        mode: 'subscription',
-        success_url: `${successUrl}?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: cancelUrl,
-        customer_email: userEmail,
-        client_reference_id: userId,
+    // Créer la session Stripe avec URLs corrigées
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{
+        price: priceId,
+        quantity: 1,
+      }],
+      mode: 'subscription',
+      success_url: `${successUrl}?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: cancelUrl,
+      customer_email: userEmail,
+      client_reference_id: userId,
+      metadata: {
+        userId: userId,
+        planId: planId
+      },
+      subscription_data: {
         metadata: {
           userId: userId,
           planId: planId
-        },
-        subscription_data: {
-          metadata: {
-            userId: userId,
-            planId: planId
-          }
-        },
-        allow_promotion_codes: true,
-        billing_address_collection: 'required',
-        // Paramètres additionnels pour sécuriser la session
-        expires_at: Math.floor(Date.now() / 1000) + (30 * 60), // Expire dans 30 minutes
-      });
+        }
+      },
+      allow_promotion_codes: true,
+      billing_address_collection: 'required',
+      expires_at: Math.floor(Date.now() / 1000) + (30 * 60), // Expire dans 30 minutes
+    });
 
-      console.log('✅ Session Stripe créée:', session.id);
-      return session;
-      
-    } catch (error) {
-      console.error('❌ Erreur création session Stripe:', error);
-      console.error('Details:', error.message);
-      throw new Error('Impossible de créer la session de paiement: ' + error.message);
-    }
+    console.log('✅ Session Stripe créée:', session.id);
+    
+    // 🔧 FIX PRINCIPAL : Retourner seulement l'ID de la session
+    return session.id; // ← CHANGEMENT ICI : au lieu de "return session;"
+    
+  } catch (error) {
+    console.error('❌ Erreur création session Stripe:', error);
+    console.error('Details:', error.message);
+    throw new Error('Impossible de créer la session de paiement: ' + error.message);
   }
+}
 
   // Méthode alternative pour compatibilité avec l'ancien code
   async createCheckoutSessionLegacy({ userId, userEmail, planId, priceId, successUrl, cancelUrl }) {
@@ -923,3 +924,4 @@ const subscriptionService = new SubscriptionService();
 subscriptionService.validateConfiguration();
 
 module.exports = subscriptionService;
+
