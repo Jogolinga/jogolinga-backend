@@ -58,7 +58,7 @@ const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
   'https://localhost:3000',
-  'https://jogolinga-frontend.vercel.app',
+  'https://jogolinga.app',
   process.env.FRONTEND_URL,
   process.env.CORS_ORIGIN
 ].filter(Boolean);
@@ -579,3 +579,4 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 module.exports = app;
+
